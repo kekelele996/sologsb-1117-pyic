@@ -10,6 +10,7 @@ import { droppointStore } from '@/stores/droppointStore'
 import { routeStore } from '@/stores/routeStore'
 import { downloadCsv, downloadJson } from '@/utils/export'
 import { bloomDays } from '@/utils/geo'
+import { findBlock, fmtTime } from '@/utils/schedule'
 
 interface ScheduleExportRow {
   orchard: string
@@ -84,13 +85,20 @@ export default function ExportPage(): JSX.Element {
       routes.map((route: TransitRoute) => {
         const from = dropPoints.find((item) => item.id === route.fromDropId)
         const to = dropPoints.find((item) => item.id === route.toDropId)
+        const block = findBlock(route, dropPoints)
         return {
+          seq: route.seq,
           from: from ? `${from.code}（${orchardName(from.orchardId)}）` : '—',
           to: to ? `${to.code}（${orchardName(to.orchardId)}）` : '—',
           distanceKm: route.distanceKm,
           durationH: route.durationH,
           vehicleType: route.vehicleType,
-          departAt: route.departAt,
+          planDepartAt: fmtTime(route.planDepartAt),
+          planArriveAt: fmtTime(route.planArriveAt),
+          actualDepartAt: route.actualDepartAt ? fmtTime(route.actualDepartAt) : '未执行',
+          scheduleStatus: block ? '受阻' : route.actualDepartAt ? '已出发' : '待执行',
+          earliestDepart: block ? fmtTime(block.earliestDepart) : '—',
+          withdrawTime: to?.withdrawTime ?? '—',
           riskNote: route.riskNote || '—',
           actualNote: route.actualNote || '—'
         }
@@ -118,12 +126,18 @@ export default function ExportPage(): JSX.Element {
 
   function exportRoutes(): void {
     downloadCsv('转场路线表.csv', routeRows as unknown as Record<string, unknown>[], [
+      { key: 'seq', label: '段序' },
       { key: 'from', label: '出发投放点' },
       { key: 'to', label: '到达投放点' },
       { key: 'distanceKm', label: '里程(km)' },
       { key: 'durationH', label: '预计耗时(h)' },
       { key: 'vehicleType', label: '车辆' },
-      { key: 'departAt', label: '出发时刻' },
+      { key: 'planDepartAt', label: '计划出发' },
+      { key: 'planArriveAt', label: '计划到达' },
+      { key: 'actualDepartAt', label: '实际出发' },
+      { key: 'scheduleStatus', label: '排程状态' },
+      { key: 'earliestDepart', label: '最早可出发' },
+      { key: 'withdrawTime', label: '撤场时间' },
       { key: 'riskNote', label: '途中风险' },
       { key: 'actualNote', label: '实际记录' }
     ])
@@ -207,12 +221,30 @@ export default function ExportPage(): JSX.Element {
             size="small"
             pagination={false}
             columns={[
+              { title: '段', dataIndex: 'seq', key: 'seq', width: 50 },
               { title: '出发投放点', dataIndex: 'from', key: 'from' },
               { title: '到达投放点', dataIndex: 'to', key: 'to' },
-              { title: '里程(km)', dataIndex: 'distanceKm', key: 'km', width: 100 },
-              { title: '耗时(h)', dataIndex: 'durationH', key: 'hour', width: 90 },
-              { title: '车辆', dataIndex: 'vehicleType', key: 'vehicle', width: 100 },
-              { title: '出发时刻', dataIndex: 'departAt', key: 'depart' },
+              { title: '里程(km)', dataIndex: 'distanceKm', key: 'km', width: 90 },
+              { title: '耗时(h)', dataIndex: 'durationH', key: 'hour', width: 80 },
+              { title: '车辆', dataIndex: 'vehicleType', key: 'vehicle', width: 90 },
+              { title: '计划出发', dataIndex: 'planDepartAt', key: 'planDepart', width: 130 },
+              { title: '计划到达', dataIndex: 'planArriveAt', key: 'planArrive', width: 130 },
+              { title: '实际出发', dataIndex: 'actualDepartAt', key: 'actualDepart', width: 130 },
+              {
+                title: '排程状态',
+                dataIndex: 'scheduleStatus',
+                key: 'status',
+                width: 150,
+                render: (value: string, record) =>
+                  value === '受阻' ? (
+                    <span style={{ color: '#cf1322' }}>
+                      受阻 · 最早可出发 {record.earliestDepart}
+                    </span>
+                  ) : (
+                    value
+                  )
+              },
+              { title: '撤场时间', dataIndex: 'withdrawTime', key: 'withdraw', width: 110 },
               { title: '途中风险', dataIndex: 'riskNote', key: 'risk' }
             ]}
           />
@@ -244,7 +276,7 @@ export default function ExportPage(): JSX.Element {
               1. 授粉安排清单按「地块 × 投放点 × 群号」展开，可直接给蜂场与园主核对；
             </Typography.Paragraph>
             <Typography.Paragraph style={{ fontSize: 13, marginBottom: 6 }}>
-              2. 转场路线表包含里程、耗时、车辆与风险备注，实际执行情况可在“转场路线规划”页回填；
+              2. 转场路线表包含里程、耗时、车辆与执行排程（计划出发 / 计划到达 / 实际出发），顺延超过撤场时间的受阻路段会标注最早可出发时刻；
             </Typography.Paragraph>
             <Typography.Paragraph style={{ fontSize: 13, marginBottom: 0 }}>
               3. 点击「打印视图」后再选择打印机或另存 PDF；数据全部来自浏览器本地 IndexedDB。

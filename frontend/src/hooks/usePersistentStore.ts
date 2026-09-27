@@ -2,9 +2,10 @@ import { useStore } from 'zustand'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import Dexie, { type Table } from 'dexie'
 import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
+import { TRANSIT_BUFFER_MIN, addMinutes, durationMinutes } from '@/utils/schedule'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -29,7 +30,7 @@ class BeeRouteDb extends Dexie {
       meta: 'key'
     })
     // v2：投放点新增「可容纳箱数」字段，迁移时为历史投放点补齐（按 8 箱兜底）
-    this.version(SCHEMA_VERSION)
+    this.version(2)
       .stores({
         orchards: 'id, name, crop, bloomStart',
         colonies: 'id, code, status, currentOrchardId',
@@ -47,6 +48,26 @@ class BeeRouteDb extends Dexie {
             }
           })
       })
+    // v3：转场路线新增执行排程字段（段序号 / 计划出发 / 计划到达 / 实际出发），
+    // 迁移时按既有顺序链式补齐计划时刻（后段 = 前段到达 + 30 分钟装卸衔接）
+    this.version(SCHEMA_VERSION).upgrade(async (tx) => {
+      const table = tx.table<TransitRoute, string>('routes')
+      const rows = await table.toArray()
+      rows.sort((a, b) => a.departAt.localeCompare(b.departAt) || a.id.localeCompare(b.id))
+      let cursorArrive = ''
+      for (let i = 0; i < rows.length; i += 1) {
+        const row = rows[i]
+        const planDepartAt = row.planDepartAt || (i === 0 || !cursorArrive ? row.departAt : addMinutes(cursorArrive, TRANSIT_BUFFER_MIN))
+        const planArriveAt = row.planArriveAt || addMinutes(planDepartAt, durationMinutes(row.durationH))
+        cursorArrive = planArriveAt
+        await table.update(row.id, {
+          seq: row.seq || i + 1,
+          planDepartAt,
+          planArriveAt,
+          actualDepartAt: row.actualDepartAt ?? ''
+        })
+      }
+    })
   }
 }
 
@@ -230,6 +251,10 @@ export async function seedDemoData(): Promise<void> {
       durationH: 0.54,
       vehicleType: '农用三轮',
       departAt: `${year}-04-13T06:30`,
+      seq: 1,
+      planDepartAt: `${year}-04-13T06:30`,
+      planArriveAt: `${year}-04-13T07:02`,
+      actualDepartAt: '',
       riskNote: '西沟坡道窄，雨天泥泞，需小车倒运',
       actualNote: '待执行'
     }
