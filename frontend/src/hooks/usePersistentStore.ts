@@ -2,9 +2,10 @@ import { useStore } from 'zustand'
 import type { StoreApi, UseBoundStore } from 'zustand'
 import Dexie, { type Table } from 'dexie'
 import type { BeeColony, DropPoint, Orchard, TransitRoute } from '@/types'
+import { addMinutes, durationMinutes } from '@/utils/schedule'
 
 /** IndexedDB 数据结构版本号 */
-export const SCHEMA_VERSION = 2
+export const SCHEMA_VERSION = 3
 
 export interface MetaRow {
   key: string
@@ -44,6 +45,31 @@ class BeeRouteDb extends Dexie {
           .modify((point) => {
             if (!point.capacityBoxes) {
               point.capacityBoxes = 8
+            }
+          })
+      })
+    // v3：转场路线新增执行排程字段（计划出发 / 计划到达 / 实际出发），迁移时按原出发时刻补齐
+    this.version(SCHEMA_VERSION)
+      .stores({
+        orchards: 'id, name, crop, bloomStart',
+        colonies: 'id, code, status, currentOrchardId',
+        dropPoints: 'id, orchardId, code, dropWindow',
+        routes: 'id, fromDropId, toDropId, departAt',
+        meta: 'key'
+      })
+      .upgrade(async (tx) => {
+        await tx
+          .table<TransitRoute, string>('routes')
+          .toCollection()
+          .modify((route) => {
+            if (!route.planDepartAt) {
+              route.planDepartAt = route.departAt
+            }
+            if (!route.planArriveAt) {
+              route.planArriveAt = addMinutes(route.planDepartAt, durationMinutes(route.durationH))
+            }
+            if (typeof route.actualDepartAt !== 'string') {
+              route.actualDepartAt = ''
             }
           })
       })
@@ -230,6 +256,9 @@ export async function seedDemoData(): Promise<void> {
       durationH: 0.54,
       vehicleType: '农用三轮',
       departAt: `${year}-04-13T06:30`,
+      planDepartAt: `${year}-04-13T06:30`,
+      planArriveAt: `${year}-04-13T07:02`,
+      actualDepartAt: '',
       riskNote: '西沟坡道窄，雨天泥泞，需小车倒运',
       actualNote: '待执行'
     }

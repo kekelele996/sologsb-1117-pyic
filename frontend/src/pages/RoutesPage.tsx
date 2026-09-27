@@ -9,6 +9,14 @@ import { orchardStore } from '@/stores/orchardStore'
 import { droppointStore } from '@/stores/droppointStore'
 import { routeStore } from '@/stores/routeStore'
 import { distanceKm, estimateDurationH, routeLegs } from '@/utils/geo'
+import { LINK_MINUTES, TIME_FORMAT, buildSchedule, fmtTime, type LegStatus, type ScheduleLeg } from '@/utils/schedule'
+
+const STATUS_COLORS: Record<LegStatus, string> = {
+  待执行: 'default',
+  已顺延: 'orange',
+  受阻: 'red',
+  已执行: 'green'
+}
 
 /** 转场路线规划：地图上依次选点生成顺序与里程，支持拖动调整顺序并重算 */
 export default function RoutesPage(): JSX.Element {
@@ -28,6 +36,10 @@ export default function RoutesPage(): JSX.Element {
   )
 
   const legs = useMemo(() => routeLegs(ordered.map((item) => ({ longitude: item.longitude, latitude: item.latitude }))), [ordered])
+
+  /** 执行排程：计划出发 / 到达 + 实际出发变动后的顺延与受阻判定 */
+  const schedule = useMemo(() => buildSchedule(routes, dropPoints), [routes, dropPoints])
+  const blockedCount = useMemo(() => schedule.filter((leg) => leg.blocked).length, [schedule])
 
   function orchardName(orchardId: string): string {
     return orchards.find((item) => item.id === orchardId)?.name ?? '未知地块'
@@ -86,6 +98,7 @@ export default function RoutesPage(): JSX.Element {
           <h2 className="page-title">转场路线规划</h2>
           <p className="page-sub">
             在投放点列表中依次选点生成转场顺序与里程；可拖动条目或上下移动调整顺序，里程与耗时实时重算，确认后写回路线表。
+            下方执行排程按「前段到达 + {LINK_MINUTES} 分钟装卸」衔接各段，登记实际出发后自动顺延未执行路段，晚于撤场时间的受阻路段会标红。
           </p>
         </div>
         <Space>
@@ -195,40 +208,100 @@ export default function RoutesPage(): JSX.Element {
         </Col>
       </Row>
 
-      <Card size="small" title={`已保存的转场路线（${routes.length} 段 · 合计 ${Math.round(routes.reduce((sum, item) => sum + item.distanceKm, 0) * 100) / 100} km）`}>
-        <Table<TransitRoute>
-          dataSource={routes}
-          rowKey="id"
+      <Card
+        size="small"
+        title={`转场执行排程（${schedule.length} 段 · 合计 ${Math.round(routes.reduce((sum, item) => sum + item.distanceKm, 0) * 100) / 100} km）`}
+        extra={
+          blockedCount > 0 ? (
+            <Tag color="red">{blockedCount} 段受阻：到达将晚于投放点撤场时间</Tag>
+          ) : (
+            <Tag color="green">各段均可按衔接时刻到达</Tag>
+          )
+        }
+      >
+        <Table<ScheduleLeg>
+          dataSource={schedule}
+          rowKey={(record) => record.route.id}
           pagination={false}
           columns={[
             {
-              title: '出发',
-              key: 'from',
-              render: (_, record: TransitRoute) => {
-                const point = dropPoints.find((item) => item.id === record.fromDropId)
-                return point ? `${point.code}（${orchardName(point.orchardId)}）` : '—'
+              title: '路段',
+              key: 'leg',
+              render: (_, record: ScheduleLeg) => {
+                const from = dropPoints.find((item) => item.id === record.route.fromDropId)
+                const to = dropPoints.find((item) => item.id === record.route.toDropId)
+                const label = (point: DropPoint | undefined): string => (point ? `${point.code}（${orchardName(point.orchardId)}）` : '—')
+                return (
+                  <span>
+                    {label(from)} → {label(to)}
+                  </span>
+                )
               }
+            },
+            { title: '里程（km）', key: 'km', width: 100, render: (_, record: ScheduleLeg) => record.route.distanceKm },
+            { title: '预计耗时（h）', key: 'hour', width: 110, render: (_, record: ScheduleLeg) => record.route.durationH },
+            { title: '车辆', key: 'vehicle', width: 100, render: (_, record: ScheduleLeg) => record.route.vehicleType },
+            {
+              title: '计划出发',
+              key: 'planDepart',
+              width: 110,
+              render: (_, record: ScheduleLeg) => fmtTime(record.planDepartAt)
             },
             {
-              title: '到达',
-              key: 'to',
-              render: (_, record: TransitRoute) => {
-                const point = dropPoints.find((item) => item.id === record.toDropId)
-                return point ? `${point.code}（${orchardName(point.orchardId)}）` : '—'
-              }
+              title: '计划到达',
+              key: 'planArrive',
+              width: 110,
+              render: (_, record: ScheduleLeg) => fmtTime(record.planArriveAt)
             },
-            { title: '里程（km）', dataIndex: 'distanceKm', key: 'km', width: 110 },
-            { title: '预计耗时（h）', dataIndex: 'durationH', key: 'hour', width: 130 },
-            { title: '车辆', dataIndex: 'vehicleType', key: 'vehicle', width: 110 },
-            { title: '出发时刻', dataIndex: 'departAt', key: 'depart', width: 160 },
-            { title: '风险备注', dataIndex: 'riskNote', key: 'risk', render: (value: string) => value || '—' },
-            { title: '实际记录', dataIndex: 'actualNote', key: 'actual', width: 120 },
+            {
+              title: '实际出发',
+              key: 'actualDepart',
+              width: 190,
+              render: (_, record: ScheduleLeg) => (
+                <DatePicker
+                  showTime
+                  allowClear
+                  size="small"
+                  placeholder="登记实际出发"
+                  value={record.actualDepartAt ? dayjs(record.actualDepartAt) : null}
+                  onChange={(value) =>
+                    void routeStore.getState().recordActual(record.route.id, value ? value.format(TIME_FORMAT) : '')
+                  }
+                />
+              )
+            },
+            {
+              title: '状态 / 衔接提示',
+              key: 'status',
+              width: 220,
+              render: (_, record: ScheduleLeg) => (
+                <Space direction="vertical" size={2}>
+                  <Tag color={STATUS_COLORS[record.status]}>{record.status}</Tag>
+                  {record.delayed ? (
+                    <Typography.Text type="warning" style={{ fontSize: 12 }}>
+                      顺延至 {fmtTime(record.effectiveDepartAt)} 出发
+                    </Typography.Text>
+                  ) : null}
+                  {record.blocked ? (
+                    <Typography.Text type="danger" style={{ fontSize: 12 }}>
+                      最早可出发 {fmtTime(record.earliestDepartAt)}，到达 {fmtTime(record.effectiveArriveAt)} 已晚于撤场{' '}
+                      {record.withdrawTime}
+                    </Typography.Text>
+                  ) : null}
+                </Space>
+              )
+            },
+            {
+              title: '风险备注',
+              key: 'risk',
+              render: (_, record: ScheduleLeg) => record.route.riskNote || '—'
+            },
             {
               title: '操作',
               key: 'action',
               width: 80,
-              render: (_, record: TransitRoute) => (
-                <Button size="small" danger type="link" onClick={() => void routeStore.getState().remove(record.id)}>
+              render: (_, record: ScheduleLeg) => (
+                <Button size="small" danger type="link" onClick={() => void routeStore.getState().remove(record.route.id)}>
                   删除
                 </Button>
               )

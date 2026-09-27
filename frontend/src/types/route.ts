@@ -14,8 +14,14 @@ export interface TransitRoute {
   /** 预计耗时（小时） */
   durationH: number
   vehicleType: VehicleType
-  /** 转场日期时刻 */
+  /** 转场日期时刻（首段计划出发，保留兼容） */
   departAt: string
+  /** 计划出发时刻 */
+  planDepartAt: string
+  /** 计划到达时刻 */
+  planArriveAt: string
+  /** 实际出发时刻（空串表示尚未执行） */
+  actualDepartAt: string
   /** 途中风险备注 */
   riskNote: string
   /** 实际转场记录 */
